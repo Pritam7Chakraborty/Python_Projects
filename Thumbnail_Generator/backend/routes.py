@@ -5,8 +5,9 @@ import json
 
 from fastapi import APIRouter,Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
+from pydantic.alias_generators import to_camel
 
 from database import get_session
 from models import Job, Thumbnail
@@ -21,6 +22,8 @@ router = APIRouter(prefix="/api")
 #request response schemas
 
 class CreateJobRequest(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
     prompt: str
     num_thumbnails: int
     headshot_url: str
@@ -119,7 +122,7 @@ async def stream_job(job_id: str):
         sent_thumbnails = set()
 
         while True:
-            with session(engine) as session:
+            with Session(engine) as session:
                 job =session.get(Job,job_id)
                 if not job:
                     yield f"data: error\ndata:{json.dump({'error': 'Job not found'})}\n\n"
@@ -153,8 +156,8 @@ async def stream_job(job_id: str):
                         sent_thumbnails.add(t.id)
                 all_done = all(t.status in ("uploaded","failed") for t in thumbnails)
                 if all_done and len(sent_thumbnails) == len(thumbnails):
-                    data = json.dumps({"job_id": job_id, "status": "job.status"})
-                    yield f"event: job_completed\ndata:{data}"
+                    data = json.dumps({"job_id": job_id, "status": job.status})
+                    yield f"event: job_completed\ndata:{data}\n\n"
                     return
             await asyncio.sleep(1.5)
                 
