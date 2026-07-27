@@ -5,21 +5,39 @@ import json
 
 from fastapi import APIRouter,Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, EmailStr
 from sqlmodel import Session, select
 from pydantic.alias_generators import to_camel
 
 from database import get_session
-from models import Job, Thumbnail
+from models import Job, Thumbnail , User
 
 from services.generator import process_job, STYLE_ORDER
 from services.imagekit_service import upload_file, get_variants
+from services.auth_service import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    get_current_user
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
 #request response schemas
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
 
 class CreateJobRequest(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
@@ -48,23 +66,56 @@ class JobResponse(BaseModel):
     thumbnails: list[ThumbnailResponse]
     status: str
 
-@router.post("/upload-headshot")
-async def upload_headshot(file: UploadFile = File(...)):
-    content = await file.read()
-    url= upload_file(
-        file_bytes=content,
-        file_name=file.filename or "headshot.jpg",
-        folder="headshots",
-        content_type=file.content_type or "image/png",
+@router.post("/auth/register", response_model=AuthResponse)
+def register(request: RegisterRequest, session: Session = Depends(get_session)):
+    existing_user = session.exec(select(User).where(User.email == request.email)).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    new_user = User(
+        email=request.email,
+        hashed_password=hash_password(request.password)
     )
-    return {"url": url}
+    session.add(new_user)
+    session.commit()
+    session.refresh(new_user)
+
+    token = create_access_token({"sub": new_user.id})
+    return {"access_token": token, "token_type": "bearer"}
+
+@router.post("/auth/login", response_model=AuthResponse)
+def login(request: LoginRequest, session: Session = Depends(get_session)):
+    user = session.exec(select(User).where(User.email == request.email)).first()
+    if not user or not verify_password(request.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = create_access_token({"sub": user.id})
+    return {"access_token": token, "token_type": "bearer"}
+
+@router.post("/upload-headshot")
+async def upload_headshot(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+    ):
+        content = await file.read()
+        url= upload_file(
+            file_bytes=content,
+            file_name=file.filename or "headshot.jpg",
+            folder=f"headshots/{current_user.id}",
+            content_type=file.content_type or "image/png",
+        )
+        return {"url": url}
 
 
 @router.post("/jobs", response_model=CreateJobResponse)
-async def create_job(request: CreateJobRequest, session: Session = Depends(get_session)):
+async def create_job(
+    request: CreateJobRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+    ):
     if request.num_thumbnails < 1 or request.num_thumbnails > 3:
         raise HTTPException(status_code=400, detail="Number of thumbnails must be between 1 and 3")
     job = Job(
+        user_id=current_user.id,
         prompt=request.prompt,
         num_thumbnails=request.num_thumbnails,
         headshot_url=request.headshot_url
