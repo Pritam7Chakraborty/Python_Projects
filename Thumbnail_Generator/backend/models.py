@@ -14,9 +14,22 @@ class User(SQLModel, table=True):
     id: str = Field(default_factory=_uuid, primary_key=True)
     email: str = Field(index=True, unique=True)
     hashed_password: str
+    credits: int = Field(default=5,ge=0)
     created_at: datetime = Field(default_factory=_now)
 
     jobs: List[Job] = Relationship(back_populates="user")
+    transactions: List["CreditTransaction"] = Relationship(back_populates="user")
+
+class CreditTransaction(SQLModel, table=True):
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    user_id: str = Field(foreign_key="User.id", index=True)
+
+    amount: int
+    reason: str = Field(description="e.g., 'signup_bonus', 'job_generation', 'stripe_refill'")
+    reference_id : Optional[str] = Field(default=None, description="The job_id or payment_id")
+    created_at: datetime = Field(default_factory=_now)
+
+    user: Optional[User] = Relationship(back_populates="transactions")
 
 class Thumbnail(SQLModel, table=True):
     id: str = Field(default_factory=_uuid, primary_key=True)

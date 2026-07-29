@@ -8,10 +8,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, EmailStr
 from sqlmodel import Session, select
 from pydantic.alias_generators import to_camel
+from typing import List
+from datetime import datetime
 
 from database import get_session
-from models import Job, Thumbnail , User
+from models import Job, Thumbnail , User, CreditTransaction
 
+from services.credit_service import add_credits, deduct_credits
 from services.generator import process_job, STYLE_ORDER
 from services.imagekit_service import upload_file, get_variants
 from services.auth_service import (
@@ -66,6 +69,23 @@ class JobResponse(BaseModel):
     thumbnails: list[ThumbnailResponse]
     status: str
 
+class BalanceResponse(BaseModel):
+    credits: int
+    user_id: str
+
+class TransactionResponse(BaseModel):
+    id: str
+    amount: int
+    reason: str
+    reference_id: str | None
+    created_at: datetime
+
+class MockPamentPayload(BaseModel):
+    user_id: str
+    amount: int
+    payment_reference_id: str
+    secret_token: str
+
 @router.post("/auth/register", response_model=AuthResponse)
 def register(request: RegisterRequest, session: Session = Depends(get_session)):
     existing_user = session.exec(select(User).where(User.email == request.email)).first()
@@ -74,11 +94,14 @@ def register(request: RegisterRequest, session: Session = Depends(get_session)):
 
     new_user = User(
         email=request.email,
-        hashed_password=hash_password(request.password)
+        hashed_password=hash_password(request.password),
+        credits=5
     )
     session.add(new_user)
     session.commit()
     session.refresh(new_user)
+
+    add_credits(session, new_user, amount=5, reason= "signup_bonus")
 
     token = create_access_token({"sub": new_user.id})
     return {"access_token": token, "token_type": "bearer"}
@@ -105,7 +128,6 @@ async def upload_headshot(
         )
         return {"url": url}
 
-
 @router.post("/jobs", response_model=CreateJobResponse)
 async def create_job(
     request: CreateJobRequest,
@@ -114,6 +136,7 @@ async def create_job(
     ):
     if request.num_thumbnails < 1 or request.num_thumbnails > 3:
         raise HTTPException(status_code=400, detail="Number of thumbnails must be between 1 and 3")
+    
     job = Job(
         user_id=current_user.id,
         prompt=request.prompt,
@@ -122,6 +145,17 @@ async def create_job(
     )
 
     session.add(job)
+    session.commit()
+    session.refresh(job)
+
+    cost = request.num_thumbnails
+    deduct_credits(
+        session = session,
+        user = current_user,
+        amount = cost,
+        reason = "job_generation",
+        reference_id = job.id
+    )
 
     styles = STYLE_ORDER[:request.num_thumbnails]
     for style in styles:
@@ -224,3 +258,53 @@ async def stream_job(job_id: str):
             "X-Accel-Buffering": "no",
             }
         )
+
+@router.get("/credits/balance", response_model=BalanceResponse)
+def get_balance(current_user: User = Depends(get_current_user)):
+    return {"credits": current_user.credits, "user_id": current_user.id}
+
+@router.get("/credits/history", response_model=List[TransactionResponse])
+def get_transaction_history(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    statement = (
+        select(CreditTransaction)
+        .where(CreditTransaction.user_id == current_user.id)
+        .order_by(CreditTransaction.created_at.desc())
+    )
+    return session.exec(statement).all()
+
+
+@router.post("/webhooks/mock-payment")
+def handle_payment_webhook(
+    payload: MockPamentPayload,
+    session: Session = Depends(get_session)
+):
+    """Simulates receiving a successful payment confirmation from Stripe/Razorpay."""
+    if payload.secret_token != "mock_secret_webhook_key_123":
+        raise HTTPException(status_code=403, detail="Invalid webhook signature")
+
+    existing_tx = session.exec(
+        select(CreditTransaction).where(
+            CreditTransaction.payment_reference_id == payload.payment_reference_id
+        )
+    ).first()
+
+    if existing_tx:
+        return {"status": "ignored", "detail": "Payment already processed"}
+
+    user = session.get(User, payload.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    add_credits(
+        session=session,
+        user=user,
+        amount=payload.amount,
+        reason="stripe_refill",
+        reference_id=payload.payment_reference_id
+    )
+
+    return {"status": "success", "detail": "Payment processed successfully"}
+
