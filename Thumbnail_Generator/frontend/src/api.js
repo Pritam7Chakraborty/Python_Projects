@@ -1,10 +1,39 @@
 const API_BASE = "/api";
 
+const getToken = () => localStorage.getItem("token");
+
+export async function login(email, password){
+    const res = await fetch(`${API_BASE}/auth/login`,{
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({email, password}),
+    });
+    if (!res.ok) throw new Error("Login failed. Check your credentials.");
+    const data = await res.json();
+    localStorage.setItem("token", data.access_token);
+    return data;
+}
+
+export async function register(email, password){
+    const res = await fetch(`${API_BASE}/auth/register`,{
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({email, password}),
+    });
+    if (!res.ok) throw new Error("Registration failed. Email might be in use.");
+    const data = await res.json();
+    localStorage.setItem("token", data.access_token);
+    return data;
+}
+
 export async function uploadHeadshot(file) {
     const form= new FormData();
     form.append("file", file);
     const res = await fetch(`${API_BASE}/upload-headshot`, {
         method: "POST",
+        headers: {
+            "Authorization": `Bearer ${getToken()}`
+        },
         body: form,
     });
     if (!res.ok) {
@@ -18,6 +47,7 @@ export async function createJob({prompt, numThumbnails, headshotUrl}) {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
+            "Authorization": `Bearer ${getToken()}`
         },
         body: JSON.stringify({
             prompt,
